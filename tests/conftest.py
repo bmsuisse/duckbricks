@@ -65,9 +65,7 @@ def mock_warehouse():
 
         def resolve_chunk(request: httpx.Request) -> httpx.Response:
             idx = int(str(request.url).rsplit("/", 1)[-1])
-            return httpx.Response(
-                200, json={"external_links": [{"external_link": f"{HOST}/_data/chunk-{idx}"}]}
-            )
+            return httpx.Response(200, json={"external_links": [{"external_link": f"{HOST}/_data/chunk-{idx}"}]})
 
         router.get(url__regex=rf"{HOST}/api/2\.0/sql/statements/{statement_id}/result/chunks/\d+").mock(
             side_effect=resolve_chunk

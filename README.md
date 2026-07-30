@@ -39,6 +39,10 @@ asyncio.run(main())
 
 See [`examples/basic.py`](examples/basic.py) for a runnable version.
 
+## Why not `databricks-sql-connector`?
+
+The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility (generic SQL tooling, JDBC/ODBC-style connection semantics). If you just want to pull a query result into your own app as JSON/rows/Arrow, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies (`pyarrow` is at least now optional). duckbricks' core is `httpx` + `tenacity`; `duckdb`/`nanoarrow` are one opt-in extra, and that's the whole dependency tree.
+
 ## Auth
 
 `DatabricksClient` takes either:
