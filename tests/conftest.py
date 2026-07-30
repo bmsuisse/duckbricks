@@ -38,6 +38,11 @@ def warehouse_host_id() -> tuple[str, str]:
 
 
 @pytest.fixture
+def chunk_bytes_builder():
+    return build_chunk_bytes
+
+
+@pytest.fixture
 def mock_warehouse():
     """Registers respx routes for a fake warehouse with `n_chunks` chunks of
     `rows_per_chunk` rows each (id column running 0..n_chunks*rows_per_chunk).
