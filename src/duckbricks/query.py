@@ -10,9 +10,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import json
+import os
+import tempfile
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import Any, TypeVar
+from uuid import uuid4
 
 import duckdb
 from nanoarrow.ipc import InputStream, StreamWriter
@@ -25,6 +29,7 @@ __all__ = [
     "QueryTimeout",
     "ReplayableArrowChunk",
     "await_with_heartbeat",
+    "feed_duckdb_table_to_databricks",
     "feed_select_to_duckdb_table",
     "run_query",
     "run_query_streamed",
@@ -447,3 +452,131 @@ async def feed_select_to_duckdb_table(
                 con.unregister("_c")
             next_idx += 1
     return rows_written
+
+
+async def _execute_json_with_timeout(
+    client: DatabricksClient, statement: str, *, total_timeout_s: float | None
+) -> tuple[str, dict[str, Any]]:
+    """Runs one JSON_ARRAY statement to completion, same
+    await_with_heartbeat/total_timeout_s pattern run_query uses for its own
+    single awaitable -- there's no stream of intermediate items to hand back
+    here (this is a short-lived DDL/COPY call, not a big result fetch), just
+    the timeout enforcement."""
+    result: tuple[str, dict[str, Any]] | None = None
+    async for item in await_with_heartbeat(client.execute_json_statement(statement), total_timeout_s=total_timeout_s):
+        if item is not HEARTBEAT:
+            result = item
+    assert result is not None  # noqa: S101 -- await_with_heartbeat always yields a real result last
+    return result
+
+
+async def _fetch_json_rows(client: DatabricksClient, statement_id: str, manifest: dict[str, Any]) -> list[list[Any]]:
+    """Fetches every chunk of a JSON_ARRAY statement's result and flattens
+    them in chunk_index order -- chunks can complete out of order over the
+    network (see client.py), same reasoning as _fetch_chunks' sort on the
+    Arrow path. Returns an empty list for a statement with no result rows
+    (e.g. a DDL statement)."""
+    chunk_metas = manifest.get("chunks") or []
+    if not chunk_metas:
+        return []
+    chunks = [
+        (chunk_index, json.loads(blob))
+        async for blob, _row_count, chunk_index in client.stream_chunks_by_index(statement_id, chunk_metas)
+    ]
+    rows: list[list[Any]] = []
+    for _chunk_index, chunk_rows in sorted(chunks, key=lambda c: c[0]):
+        rows.extend(chunk_rows)
+    return rows
+
+
+def _column_value(manifest: dict[str, Any], row: list[Any], column: str) -> Any:
+    """Looks up `column` by name in a JSON_ARRAY statement's manifest schema
+    and returns that position's value out of `row`."""
+    columns = manifest.get("schema", {}).get("columns") or []
+    for i, col in enumerate(columns):
+        if col.get("name") == column:
+            return row[col.get("position", i)]
+    raise KeyError(f"column {column!r} not found in statement result")
+
+
+async def feed_duckdb_table_to_databricks(
+    client: DatabricksClient,
+    con: duckdb.DuckDBPyConnection,
+    source_sql: str,
+    target_table: str,
+    *,
+    staging_volume: str,
+    mode: str = "append",
+    total_timeout_s: float | None = None,
+) -> int:
+    """The reverse of feed_select_to_duckdb_table -- writes `source_sql`'s
+    result (any SELECT `con` can run) up to Databricks as `target_table`,
+    instead of pulling a Databricks query down into DuckDB.
+
+    `source_sql`'s result is written to a local Parquet file via DuckDB's own
+    `COPY ... TO ... (FORMAT PARQUET)` (in a temp directory, cleaned up once
+    uploaded), uploaded to a fresh, unique subpath under `staging_volume` -- a
+    fully-qualified Unity Catalog volume path, e.g.
+    `/Volumes/my_catalog/my_schema/my_volume`, caller-supplied in full like
+    everywhere else in this package (see AGENTS.md) -- and loaded into
+    `target_table` (also fully-qualified, e.g. `my_catalog.my_schema.customers`)
+    with a Databricks-side SQL statement.
+
+    `mode` is "append" (default -- Databricks `COPY INTO`, which tracks
+    already-loaded files internally, so re-running against the same staged
+    files is a no-op rather than a duplicate load) or "replace"
+    (`CREATE OR REPLACE TABLE ... AS SELECT`, fully replacing `target_table`).
+    Returns the number of rows written -- for "append" that's `COPY INTO`'s
+    own `num_inserted_rows`; "replace" doesn't get a row count from `CREATE
+    TABLE AS` the same way, so it follows up with a `SELECT COUNT(*)`.
+
+    Every uploaded staging file is deleted afterwards regardless of outcome
+    (best-effort -- a cleanup failure never masks a successful load or
+    replaces whatever exception the load itself raised)."""
+    if mode not in ("append", "replace"):
+        raise ValueError(f"mode must be 'append' or 'replace', got {mode!r}")
+
+    stage_path = f"{staging_volume.rstrip('/')}/_duckbricks_{uuid4()}"
+    uploaded_paths: list[str] = []
+    try:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            local_path = os.path.join(tmp_dir, "data.parquet")
+            con.execute(f"COPY ({source_sql}) TO '{local_path}' (FORMAT PARQUET)")  # noqa: S608
+            for name in sorted(os.listdir(tmp_dir)):
+                with open(os.path.join(tmp_dir, name), "rb") as f:
+                    data = f.read()
+                volume_path = f"{stage_path}/{name}"
+                await client.upload_volume_file(volume_path, data)
+                uploaded_paths.append(volume_path)
+
+        if mode == "replace":
+            await _execute_json_with_timeout(
+                client,
+                f"CREATE OR REPLACE TABLE {target_table} AS "  # noqa: S608
+                f"SELECT * FROM read_files('{stage_path}', format => 'parquet')",
+                total_timeout_s=total_timeout_s,
+            )
+            statement_id, manifest = await _execute_json_with_timeout(
+                client,
+                f"SELECT COUNT(*) FROM {target_table}",  # noqa: S608
+                total_timeout_s=total_timeout_s,
+            )
+            rows = await _fetch_json_rows(client, statement_id, manifest)
+            return int(rows[0][0]) if rows else 0
+
+        statement_id, manifest = await _execute_json_with_timeout(
+            client,
+            f"COPY INTO {target_table} FROM '{stage_path}' FILEFORMAT = PARQUET",  # noqa: S608
+            total_timeout_s=total_timeout_s,
+        )
+        rows = await _fetch_json_rows(client, statement_id, manifest)
+        if not rows:
+            return 0
+        return int(_column_value(manifest, rows[0], "num_inserted_rows"))
+    finally:
+        for volume_path in uploaded_paths:
+            # Best-effort cleanup -- a failure here never masks a successful
+            # load's result or replaces whatever exception the load itself
+            # raised (see the try/finally this sits in).
+            with contextlib.suppress(Exception):
+                await client.delete_volume_file(volume_path)

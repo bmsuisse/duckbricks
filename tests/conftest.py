@@ -87,3 +87,20 @@ def mock_warehouse():
         router.get(url__regex=rf"{HOST}/_data/chunk-\d+").mock(side_effect=serve_chunk_bytes)
 
     return _install
+
+
+@pytest.fixture
+def mock_volume_files():
+    """Registers respx routes for the Files API's PUT (upload)/DELETE
+    endpoints (DatabricksClient.upload_volume_file/delete_volume_file) --
+    kept separate from mock_warehouse since it's a different API surface
+    entirely (no statement/manifest/chunk shape to it). Returns the
+    (put_route, delete_route) respx.Route objects so a test can assert on
+    call_count/request bodies."""
+
+    def _install(router: respx.Router, host: str) -> tuple[respx.Route, respx.Route]:
+        put_route = router.put(url__regex=rf"{host}/api/2\.0/fs/files/.*").mock(return_value=httpx.Response(204))
+        delete_route = router.delete(url__regex=rf"{host}/api/2\.0/fs/files/.*").mock(return_value=httpx.Response(204))
+        return put_route, delete_route
+
+    return _install

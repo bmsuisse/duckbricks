@@ -48,9 +48,11 @@ materializing a query straight into a table on your own DuckDB connection,
 [`examples/local_duckdb_mart.py`](examples/local_duckdb_mart.py) for doing
 that into a persistent local DuckDB file, exporting it to Excel, and querying
 it again with plain DuckDB SQL -- no more Databricks round trips once the
-data's on disk -- or [`examples/fastapi_sse.py`](examples/fastapi_sse.py) for
+data's on disk -- [`examples/fastapi_sse.py`](examples/fastapi_sse.py) for
 streaming a query to a client as Server-Sent Events, first row out as soon as
-its chunk arrives.
+its chunk arrives, or
+[`examples/feed_duckdb_table_to_databricks.py`](examples/feed_duckdb_table_to_databricks.py)
+for writing local DuckDB data back up to a Databricks table.
 
 ## Why not `databricks-sql-connector`?
 
@@ -78,7 +80,9 @@ For Azure Databricks via Azure AD (`azure-identity`), see [`examples/azure_auth.
 - `run_query_streamed(client, sql, *, as_arrow=False, **kwargs)` -- yields `HEARTBEAT` while waiting, then the final `QueryResult` or Arrow bytes.
 - `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives.
 - `feed_select_to_duckdb_table(client, sql, con, table_name, *, if_exists="replace", **kwargs) -> int` -- streams the result straight into `table_name` on your own `duckdb.DuckDBPyConnection` (in-memory or a persistent `duckdb.connect("some.duckdb")`) as chunks arrive; `con` stays open afterwards with a real table to keep querying. `if_exists` is `"replace"` (default), `"append"`, or `"fail"`. Returns the row count written.
+- `feed_duckdb_table_to_databricks(client, con, source_sql, target_table, *, staging_volume, mode="append", total_timeout_s=None) -> int` -- the reverse direction: stages `source_sql`'s result (run on your own DuckDB connection) as Parquet under a Unity Catalog volume path and loads it into `target_table` on Databricks. `mode` is `"append"` (default, via `COPY INTO`) or `"replace"` (`CREATE OR REPLACE TABLE ... AS SELECT`). Returns the row count written; staged files are always cleaned up afterwards.
 - `client.execute_json_statement(sql, ...)` -- lower-level: JSON rows straight from Databricks, no duckdb/nanoarrow needed.
+- `client.upload_volume_file(volume_path, data)` / `client.delete_volume_file(volume_path)` -- lower-level Files API access to a Unity Catalog volume, used internally by `feed_duckdb_table_to_databricks`.
 
 `run_query`/`run_query_streamed`/`stream_query_json`/`feed_select_to_duckdb_table` all accept `catalog`, `schema`, `params` (Databricks' own `[{"name", "value", "type"}]` named-parameter format), `row_limit`, `offset`, and `total_timeout_s`.
 

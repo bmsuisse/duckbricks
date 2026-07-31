@@ -83,6 +83,51 @@ async def test_transient_5xx_is_retried_then_succeeds(warehouse_host_id, chunk_b
 
 @pytest.mark.asyncio
 @respx.mock
+async def test_upload_volume_file_puts_bytes_with_overwrite(mock_volume_files, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    put_route, _delete_route = mock_volume_files(respx.mock, host)
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+
+    await client.upload_volume_file("/Volumes/cat/schema/vol/some/file.parquet", b"parquet-bytes")
+
+    assert put_route.call_count == 1
+    request = put_route.calls.last.request
+    assert request.url.path == "/api/2.0/fs/files/Volumes/cat/schema/vol/some/file.parquet"
+    assert request.url.params["overwrite"] == "true"
+    assert request.content == b"parquet-bytes"
+    assert request.headers["Content-Type"] == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_delete_volume_file_treats_404_as_success(mock_volume_files, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    _put_route, delete_route = mock_volume_files(respx.mock, host)
+    delete_route.mock(return_value=httpx.Response(404))
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+
+    await client.delete_volume_file("/Volumes/cat/schema/vol/already-gone.parquet")  # must not raise
+
+    assert delete_route.call_count == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_delete_volume_file_reraises_non_404_errors(mock_volume_files, warehouse_host_id):
+    host, warehouse_id = warehouse_host_id
+    # 400 rather than a transient status (401/403/408/429/5xx) -- those get
+    # retried by _is_transient_error, which would just slow this test down
+    # without testing anything different.
+    _put_route, delete_route = mock_volume_files(respx.mock, host)
+    delete_route.mock(return_value=httpx.Response(400))
+    client = DatabricksClient(host, warehouse_id, token="test-token")
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await client.delete_volume_file("/Volumes/cat/schema/vol/forbidden.parquet")
+
+
+@pytest.mark.asyncio
+@respx.mock
 async def test_permanent_4xx_is_not_retried(warehouse_host_id):
     """A permanent 404 (e.g. a typo'd host/path) should fail immediately, not
     burn through the whole retry budget the way a transient 401/403/429/5xx

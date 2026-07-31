@@ -101,16 +101,20 @@ class DatabricksClient:
             return await cast("Awaitable[str]", result)
         return cast(str, result)
 
-    async def _headers(self) -> dict[str, str]:
+    async def _headers(self, content_type: str = "application/json") -> dict[str, str]:
         return {
             "Authorization": f"Bearer {await self._bearer_token()}",
-            "Content-Type": "application/json",
+            "Content-Type": content_type,
         }
 
-    async def _authed_request(self, client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    async def _authed_request(
+        self, client: httpx.AsyncClient, method: str, url: str, *, content_type: str = "application/json", **kwargs: Any
+    ) -> httpx.Response:
         @_retrying()
         async def _do() -> httpx.Response:
-            resp = await client.request(method, url, headers=await self._headers(), timeout=self.http_timeout, **kwargs)
+            resp = await client.request(
+                method, url, headers=await self._headers(content_type), timeout=self.http_timeout, **kwargs
+            )
             resp.raise_for_status()
             return resp
 
@@ -231,6 +235,34 @@ class DatabricksClient:
             wait_timeout=wait_timeout,
             parameters=parameters,
         )
+
+    async def upload_volume_file(self, volume_path: str, data: bytes) -> None:
+        """Uploads `data` to a Unity Catalog volume path via the Files API,
+        overwriting anything already there. `volume_path` is caller-supplied
+        in full (e.g. `/Volumes/my_catalog/my_schema/my_volume/some/file.parquet`)
+        -- this package has no knowledge of any specific catalog/schema/volume
+        (see AGENTS.md)."""
+        async with httpx.AsyncClient() as client:
+            await self._authed_request(
+                client,
+                "PUT",
+                f"{self._host}/api/2.0/fs/files{volume_path}",
+                params={"overwrite": "true"},
+                content_type="application/octet-stream",
+                content=data,
+            )
+
+    async def delete_volume_file(self, volume_path: str) -> None:
+        """Deletes a file at `volume_path` (see upload_volume_file). A 404 is
+        treated as success -- the file is already gone, which is fine for the
+        idempotent staging cleanup this exists for (see query.py's
+        feed_duckdb_table_to_databricks)."""
+        async with httpx.AsyncClient() as client:
+            try:
+                await self._authed_request(client, "DELETE", f"{self._host}/api/2.0/fs/files{volume_path}")
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
 
     async def stream_chunks_by_index(
         self, statement_id: str, chunk_metas: list[dict[str, Any]]
