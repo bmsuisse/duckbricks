@@ -2,7 +2,8 @@
 serializes the Arrow-IPC result chunks through DuckDB -- used purely as a
 thin Arrow -> JSON/rows/Arrow-bytes converter here, not a query engine; all
 joins/filtering/ordering happen in the SQL submitted to Databricks. Requires
-the `duckdb` extra (`pip install duckbricks[duckdb]`).
+the `duckdb` extra (`pip install duckbricks[duckdb]`) or its `duckdb-arro3`
+alternative (see _arrow_backend.py).
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ from typing import Any, TypeVar
 from uuid import uuid4
 
 import duckdb
-from nanoarrow.ipc import InputStream, StreamWriter
 
+from ._arrow_backend import parse_ipc_stream, write_ipc_stream
 from .client import DatabricksClient
 
 __all__ = [
@@ -69,10 +70,11 @@ class ReplayableArrowChunk:
     """Wraps one Arrow IPC-stream byte chunk so it can be handed to DuckDB's
     replacement scan / `from_arrow`. DuckDB calls `__arrow_c_stream__` more
     than once per relation (a schema peek, then the actual scan) -- a plain
-    nanoarrow InputStream is single-use and raises "no longer valid" on the
-    second call, so this re-parses from the cached bytes every call instead.
-    The bytes are already fully in memory (just downloaded), so re-parsing
-    costs a cheap second pass, not a second network fetch."""
+    parsed stream is single-use and raises on the second call (both the
+    nanoarrow and arro3 backends -- see _arrow_backend.py), so this re-parses
+    from the cached bytes every call instead. The bytes are already fully in
+    memory (just downloaded), so re-parsing costs a cheap second pass, not a
+    second network fetch."""
 
     __slots__ = ("_data", "chunk_index", "declared_row_count")
 
@@ -82,7 +84,7 @@ class ReplayableArrowChunk:
         self.declared_row_count = declared_row_count
 
     def __arrow_c_stream__(self, requested_schema: object = None) -> object:
-        return InputStream.from_readable(io.BytesIO(self._data)).__arrow_c_stream__(requested_schema)
+        return parse_ipc_stream(self._data).__arrow_c_stream__(requested_schema)
 
     def nbytes(self) -> int:
         return len(self._data)
@@ -261,8 +263,7 @@ def _to_arrow_bytes(chunks: list[ReplayableArrowChunk]) -> bytes:
         sql = _register_chunks(con, chunks)
         rel = con.sql(sql)  # noqa: S608
         buf = io.BytesIO()
-        with StreamWriter.from_writable(buf) as writer:
-            writer.write_stream(rel)
+        write_ipc_stream(rel, buf)
         return buf.getvalue()
     finally:
         con.close()

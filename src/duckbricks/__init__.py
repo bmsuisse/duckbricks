@@ -1,11 +1,13 @@
+from ._arrow_backend import set_arrow_backend
 from .client import DatabricksClient
 
-__all__ = ["DatabricksClient"]
+__all__ = ["DatabricksClient", "set_arrow_backend"]
 
 # The DuckDB-based serialization layer needs the `duckdb` extra
-# (`pip install duckbricks[duckdb]`) -- keep it out of the top-level import so
+# (`pip install duckbricks[duckdb]`, or `duckdb-arro3` -- see
+# src/duckbricks/_arrow_backend.py) -- keep it out of the top-level import so
 # `DatabricksClient` alone (e.g. for execute_json_statement) stays usable
-# without duckdb/nanoarrow installed.
+# without duckdb/an Arrow backend installed.
 try:
     from .query import (
         HEARTBEAT,

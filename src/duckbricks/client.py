@@ -1,8 +1,9 @@
 """Async client for the Databricks SQL Statement Execution API, tuned for
 pulling large results out as Arrow-IPC chunks rather than running a single
-small query. No dependency on duckdb/nanoarrow -- that lives in `query.py`
-(an optional extra) so a caller who only wants JSON_ARRAY results, or raw
-Arrow bytes handled elsewhere, doesn't have to install them.
+small query. No dependency on duckdb or an Arrow backend -- those live in
+`query.py` (an optional extra, see _arrow_backend.py) so a caller who only
+wants JSON_ARRAY results, or raw Arrow bytes handled elsewhere, doesn't have
+to install them.
 """
 
 from __future__ import annotations
@@ -11,15 +12,18 @@ import asyncio
 import inspect
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 import httpx
-from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 _POLL_INTERVAL_S = 2.0
 _TERMINAL_STATES = {"SUCCEEDED", "FAILED", "CANCELED", "CLOSED"}
+_RETRY_ATTEMPTS = 6
+_RETRY_MAX_WAIT_S = 20.0
 
 TokenProvider = Callable[[], "str | Awaitable[str]"]
+
+_T = TypeVar("_T")
 
 
 def _is_transient_error(exc: BaseException) -> bool:
@@ -34,13 +38,21 @@ def _is_transient_error(exc: BaseException) -> bool:
     )
 
 
-def _retrying() -> Any:
-    return retry(
-        stop=stop_after_attempt(6),
-        wait=wait_exponential(multiplier=1, min=1, max=20),
-        retry=retry_if_exception(_is_transient_error),
-        reraise=True,
-    )
+async def _retry_call(fn: Callable[[], Awaitable[_T]]) -> _T:
+    """Retry fn() with exponential backoff (1s, 2s, 4s, ... capped at
+    _RETRY_MAX_WAIT_S) on transient errors, up to _RETRY_ATTEMPTS total tries.
+    A hand-rolled loop instead of tenacity -- this is the only retry pattern
+    in the whole client, so a dependency for it isn't worth it (see README's
+    minimal-dependency-tree pitch)."""
+    attempt = 0
+    while True:
+        try:
+            return await fn()
+        except Exception as exc:
+            if attempt == _RETRY_ATTEMPTS - 1 or not _is_transient_error(exc):
+                raise
+            await asyncio.sleep(min(_RETRY_MAX_WAIT_S, 2.0**attempt))
+            attempt += 1
 
 
 def _raise_for_failed(status: dict[str, Any]) -> None:
@@ -110,7 +122,6 @@ class DatabricksClient:
     async def _authed_request(
         self, client: httpx.AsyncClient, method: str, url: str, *, content_type: str = "application/json", **kwargs: Any
     ) -> httpx.Response:
-        @_retrying()
         async def _do() -> httpx.Response:
             resp = await client.request(
                 method, url, headers=await self._headers(content_type), timeout=self.http_timeout, **kwargs
@@ -118,7 +129,7 @@ class DatabricksClient:
             resp.raise_for_status()
             return resp
 
-        return await _do()
+        return await _retry_call(_do)
 
     async def _ensure_warehouse_running(self, client: httpx.AsyncClient) -> None:
         """Explicitly wait for the warehouse to reach RUNNING before submitting
@@ -226,7 +237,7 @@ class DatabricksClient:
         """Like _execute_statement, fixed to JSON_ARRAY -- each fetched
         chunk's bytes (see stream_chunks_by_index) are then a plain JSON array
         of rows, for callers that want Python values without pulling in
-        duckdb/nanoarrow to parse an Arrow IPC stream."""
+        duckdb or an Arrow backend to parse an Arrow IPC stream."""
         return await self._execute_statement(
             statement,
             format="JSON_ARRAY",
@@ -283,13 +294,12 @@ class DatabricksClient:
                 yield blob, row_count, chunk_index
 
     async def _fetch_link_bytes(self, client: httpx.AsyncClient, url: str) -> bytes:
-        @_retrying()
         async def _do() -> bytes:
             resp = await client.get(url, timeout=self.http_timeout)
             resp.raise_for_status()
             return resp.content
 
-        return await _do()
+        return await _retry_call(_do)
 
     async def _fetch_chunk_index(self, client: httpx.AsyncClient, statement_id: str, chunk_index: int) -> list[bytes]:
         """Resolve one chunk index to its external link(s) (usually exactly

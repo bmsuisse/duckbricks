@@ -10,23 +10,24 @@ import duckdb
 import httpx
 import pytest
 import respx
-from nanoarrow.ipc import StreamWriter
+
+from duckbricks._arrow_backend import write_ipc_stream
 
 HOST = "https://fake-workspace.cloud.databricks.com"
 WAREHOUSE_ID = "wh-test-123"
 
 
 def build_chunk_bytes(lo: int, hi: int) -> bytes:
-    """Synthesizes one chunk's Arrow-IPC bytes via DuckDB + nanoarrow's
-    StreamWriter -- the same approach query.py's _to_arrow_bytes uses -- so
-    tests exercise the real Arrow-C-Data-Interface round trip DuckDB does in
-    production, without a live Databricks connection."""
+    """Synthesizes one chunk's Arrow-IPC bytes via DuckDB + whichever Arrow
+    backend is installed (see _arrow_backend.py) -- the same approach
+    query.py's _to_arrow_bytes uses -- so tests exercise the real
+    Arrow-C-Data-Interface round trip DuckDB does in production, without a
+    live Databricks connection."""
     con = duckdb.connect(":memory:")
     try:
         rel = con.sql(f"SELECT i AS id, 'row_' || i AS label FROM range({lo}, {hi}) t(i)")  # noqa: S608
         buf = io.BytesIO()
-        with StreamWriter.from_writable(buf) as writer:
-            writer.write_stream(rel)
+        write_ipc_stream(rel, buf)
         return buf.getvalue()
     finally:
         con.close()

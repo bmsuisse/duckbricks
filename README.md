@@ -7,7 +7,7 @@
 
 Runs SQL against a Databricks SQL warehouse via the Statement Execution API, streams the Arrow-IPC result chunks with backpressure into DuckDB (a thin Arrow-to-JSON/rows converter, not a query engine), preserving chunk order with SSE-safe heartbeats during slow cold-starts.
 
-- No pyarrow/pandas/numpy dependency chain -- chunks are parsed via [nanoarrow](https://github.com/apache/arrow-nanoarrow) and handed to DuckDB through the Arrow C Data Interface.
+- No pyarrow/pandas/numpy dependency chain -- chunks are parsed via [nanoarrow](https://github.com/apache/arrow-nanoarrow) (default) or [arro3](https://github.com/kylebarron/arro3) and handed to DuckDB through the Arrow C Data Interface.
 - Bring-your-own-auth -- a static token or your own token-refresh callable. No cloud-SDK dependency baked in.
 - Result-order preserved even though chunks can complete out of order over the network.
 - Heartbeats between slow chunks, so a caller streaming this over e.g. SSE never goes silent.
@@ -18,7 +18,7 @@ Runs SQL against a Databricks SQL warehouse via the Statement Execution API, str
 pip install duckbricks[duckdb]
 ```
 
-The `duckdb` extra pulls in `duckdb` + `nanoarrow`, needed for `run_query`/`stream_query_json`/etc. Omit it if you only want `DatabricksClient.execute_json_statement` (plain JSON rows, no Arrow/DuckDB involved).
+The `duckdb` extra pulls in `duckdb` + `nanoarrow`, needed for `run_query`/`stream_query_json`/etc. Omit it if you only want `DatabricksClient.execute_json_statement` (plain JSON rows, no Arrow/DuckDB involved). If nanoarrow doesn't have a working wheel for your platform (this has happened on Windows), install `duckbricks[duckdb-arro3]` instead -- same API, an arro3-backed Arrow IPC implementation instead of nanoarrow's (see [`src/duckbricks/_arrow_backend.py`](src/duckbricks/_arrow_backend.py); ~12x larger on disk, no real speed difference, so prefer `duckdb` unless you specifically need it). You can also plug in your own Arrow IPC implementation via `duckbricks.set_arrow_backend(...)` instead of either extra.
 
 ## Quickstart
 
@@ -56,7 +56,7 @@ for writing local DuckDB data back up to a Databricks table.
 
 ## Why not `databricks-sql-connector`?
 
-The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility (generic SQL tooling, JDBC/ODBC-style connection semantics). If you just want to pull a query result into your own app as JSON/rows/Arrow, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies (`pyarrow` is at least now optional). duckbricks' core is `httpx` + `tenacity`; `duckdb`/`nanoarrow` are one opt-in extra, and that's the whole dependency tree.
+The [official driver](https://github.com/databricks/databricks-sql-python) is the right choice if you need full DB-API 2.0 compatibility (generic SQL tooling, JDBC/ODBC-style connection semantics). If you just want to pull a query result into your own app as JSON/rows/Arrow, it drags in a lot for that: `pandas`, `thrift`, `openpyxl`, `pybreaker`, `pyjwt`, `oauthlib`, `lz4`, `requests`, `urllib3` as hard dependencies (`pyarrow` is at least now optional). duckbricks' core is `httpx` alone; `duckdb` + an Arrow backend (nanoarrow or arro3) are one opt-in extra, and that's the whole dependency tree.
 
 ## Auth
 
@@ -81,7 +81,7 @@ For Azure Databricks via Azure AD (`azure-identity`), see [`examples/azure_auth.
 - `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives.
 - `feed_select_to_duckdb_table(client, sql, con, table_name, *, if_exists="replace", **kwargs) -> int` -- streams the result straight into `table_name` on your own `duckdb.DuckDBPyConnection` (in-memory or a persistent `duckdb.connect("some.duckdb")`) as chunks arrive; `con` stays open afterwards with a real table to keep querying. `if_exists` is `"replace"` (default), `"append"`, or `"fail"`. Returns the row count written.
 - `feed_duckdb_table_to_databricks(client, con, source_sql, target_table, *, staging_volume, mode="append", total_timeout_s=None) -> int` -- the reverse direction: stages `source_sql`'s result (run on your own DuckDB connection) as Parquet under a Unity Catalog volume path and loads it into `target_table` on Databricks. `mode` is `"append"` (default, via `COPY INTO`) or `"replace"` (`CREATE OR REPLACE TABLE ... AS SELECT`). Returns the row count written; staged files are always cleaned up afterwards.
-- `client.execute_json_statement(sql, ...)` -- lower-level: JSON rows straight from Databricks, no duckdb/nanoarrow needed.
+- `client.execute_json_statement(sql, ...)` -- lower-level: JSON rows straight from Databricks, no duckdb/Arrow backend needed.
 - `client.upload_volume_file(volume_path, data)` / `client.delete_volume_file(volume_path)` -- lower-level Files API access to a Unity Catalog volume, used internally by `feed_duckdb_table_to_databricks`.
 
 `run_query`/`run_query_streamed`/`stream_query_json`/`feed_select_to_duckdb_table` all accept `catalog`, `schema`, `params` (Databricks' own `[{"name", "value", "type"}]` named-parameter format), `row_limit`, `offset`, and `total_timeout_s`.
