@@ -1,6 +1,6 @@
 [project]
 name = "duckbricks"
-version = "0.1.1"
+version = "0.1.2"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API, streams the Arrow-IPC result chunks with backpressure into DuckDB for JSON/rows/Arrow serialization -- no pyarrow required."
 readme = "README.md"
 license = "MIT"

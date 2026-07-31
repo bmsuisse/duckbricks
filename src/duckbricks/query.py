@@ -25,6 +25,7 @@ __all__ = [
     "QueryTimeout",
     "ReplayableArrowChunk",
     "await_with_heartbeat",
+    "feed_select_to_duckdb_table",
     "run_query",
     "run_query_streamed",
     "stream_query_json",
@@ -200,6 +201,10 @@ def _windowed_sql(sql: str, *, row_limit: int | None, offset: int | None) -> str
     return f"SELECT * FROM ({sql}) _q LIMIT {row_limit}"  # noqa: S608
 
 
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _register_chunks(con: duckdb.DuckDBPyConnection, chunks: list[ReplayableArrowChunk]) -> str:
     """Registers each already-fetched Arrow chunk as its own DuckDB relation
     and returns a UNION ALL selecting across all of them, in list order."""
@@ -373,3 +378,72 @@ async def stream_query_json(
                 next_idx += 1
     finally:
         con.close()
+
+
+async def feed_select_to_duckdb_table(
+    client: DatabricksClient,
+    sql: str,
+    con: duckdb.DuckDBPyConnection,
+    table_name: str,
+    *,
+    params: list[dict[str, Any]] | None = None,
+    row_limit: int | None = None,
+    offset: int | None = None,
+    catalog: str | None = None,
+    schema: str | None = None,
+    if_exists: str = "replace",
+    total_timeout_s: float | None = None,
+) -> int:
+    """Streams `sql`'s result straight into `table_name` on `con` -- a DuckDB
+    connection you already have, in-memory or a persistent
+    `duckdb.connect("some.duckdb")` -- as Arrow chunks arrive from Databricks,
+    the same reorder-buffered chunk-at-a-time approach as stream_query_json
+    (see its docstring), instead of buffering the whole result in Python
+    first. `con` is left open and `table_name` a real, independently
+    queryable table afterwards -- this function's only job is getting the
+    data there.
+
+    `if_exists` is "replace" (default -- drops/recreates `table_name`),
+    "append" (table must already exist with a compatible schema), or "fail"
+    (raise if it already exists). Returns the number of rows written.
+
+    If the query itself returns zero rows, no table is created/touched --
+    without at least one chunk there's no real schema to create an empty
+    table from (same reasoning as _to_arrow_bytes's empty-result case)."""
+    if if_exists not in ("replace", "append", "fail"):
+        raise ValueError(f"if_exists must be 'replace', 'append', or 'fail', got {if_exists!r}")
+
+    quoted = _quote_ident(table_name)
+    if if_exists == "fail":
+        exists = con.execute("SELECT 1 FROM information_schema.tables WHERE table_name = ?", [table_name]).fetchone()
+        if exists:
+            raise ValueError(f"table {table_name!r} already exists (if_exists='fail')")
+
+    windowed_sql = _windowed_sql(sql, row_limit=row_limit, offset=offset)
+    _statement_id, _manifest, chunk_iter = await fetch_arrow_chunks_with_manifest(
+        client, windowed_sql, catalog=catalog, schema=schema, parameters=params
+    )
+
+    pending: dict[int, ReplayableArrowChunk] = {}
+    next_idx = 0
+    table_ready = if_exists == "append"
+    rows_written = 0
+    async for item in _heartbeat_over_stream(chunk_iter, total_timeout_s=total_timeout_s):
+        if item is HEARTBEAT:
+            continue
+        pending[item.chunk_index] = item
+        while next_idx in pending:
+            con.register("_c", pending.pop(next_idx))
+            try:
+                if not table_ready:
+                    cur = con.execute(f"CREATE OR REPLACE TABLE {quoted} AS SELECT * FROM _c")  # noqa: S608
+                    table_ready = True
+                else:
+                    cur = con.execute(f"INSERT INTO {quoted} SELECT * FROM _c")  # noqa: S608
+                row = cur.fetchone()
+                assert row is not None  # noqa: S101 -- CREATE TABLE AS/INSERT INTO always return one Count row
+                rows_written += row[0]
+            finally:
+                con.unregister("_c")
+            next_idx += 1
+    return rows_written

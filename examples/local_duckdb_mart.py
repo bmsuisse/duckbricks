@@ -7,65 +7,21 @@ once the data is on disk. Requires `pip install duckbricks[duckdb]`.
     DATABRICKS_TOKEN=dapi... \\
     python examples/local_duckdb_mart.py
 
-This uses `stream_query_json` (not `run_query`) specifically because it
-writes each batch to disk AS IT ARRIVES rather than buffering the whole
-result in memory first -- the same reason that function exists in the first
-place (see its docstring). For a result you're happy to hold in memory as one
-shot, `run_query_streamed(..., as_arrow=True)` + DuckDB's Arrow C Data
-Interface (the same trick duckbricks uses internally) is less code; this
-example intentionally shows the streaming path since that's what was asked.
+Uses feed_select_to_duckdb_table, which writes each Arrow chunk to `con`
+directly as it arrives (bounded memory, same as stream_query_json) rather
+than buffering the whole result first -- see its docstring.
 """
 
 import asyncio
 import os
-import tempfile
 
 import duckdb
 
-from duckbricks import DatabricksClient, stream_query_json
+from duckbricks import DatabricksClient, feed_select_to_duckdb_table
 
 DB_PATH = "onesales_local.duckdb"
 TABLE = "customers"
 XLSX_PATH = "customers.xlsx"
-BATCH_SIZE = 1_000  # rows buffered in Python before each disk write
-
-
-async def stream_into_duckdb(client: DatabricksClient, sql: str, con: duckdb.DuckDBPyConnection) -> int:
-    """Batches stream_query_json's per-row JSON strings and flushes each
-    batch to `TABLE` via a temp NDJSON file + DuckDB's own read_json_auto --
-    the first flush creates the table (schema inferred from the data), every
-    later one just inserts. Returns the total row count written."""
-    batch: list[str] = []
-    total = 0
-    table_created = False
-
-    async def flush() -> None:
-        nonlocal table_created
-        if not batch:
-            return
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".ndjson", delete=False) as f:
-            f.write("\n".join(batch))
-            path = f.name
-        try:
-            # TABLE is a fixed module constant, not user input, in both queries below.
-            if not table_created:
-                sql = f"CREATE OR REPLACE TABLE {TABLE} AS SELECT * FROM read_json_auto(?)"  # noqa: S608
-                con.execute(sql, [path])
-                table_created = True
-            else:
-                sql = f"INSERT INTO {TABLE} SELECT * FROM read_json_auto(?)"  # noqa: S608
-                con.execute(sql, [path])
-        finally:
-            os.unlink(path)
-        batch.clear()
-
-    async for row_json in stream_query_json(client, sql):
-        batch.append(row_json)
-        total += 1
-        if len(batch) >= BATCH_SIZE:
-            await flush()
-    await flush()  # remaining partial batch
-    return total
 
 
 async def main() -> None:
@@ -76,7 +32,7 @@ async def main() -> None:
     )
     con = duckdb.connect(DB_PATH)
 
-    rows = await stream_into_duckdb(client, "SELECT * FROM my_catalog.my_schema.customers", con)
+    rows = await feed_select_to_duckdb_table(client, "SELECT * FROM my_catalog.my_schema.customers", con, TABLE)
     print(f"Wrote {rows} rows to {DB_PATH}::{TABLE}")
 
     # Pure DuckDB from here on -- no more Databricks calls. The `excel`

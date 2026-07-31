@@ -73,9 +73,10 @@ For Azure Databricks via Azure AD (`azure-identity`), see [`examples/azure_auth.
 - `run_query(client, sql, **kwargs) -> QueryResult` -- full result, buffered.
 - `run_query_streamed(client, sql, *, as_arrow=False, **kwargs)` -- yields `HEARTBEAT` while waiting, then the final `QueryResult` or Arrow bytes.
 - `stream_query_json(client, sql, **kwargs)` -- yields `HEARTBEAT`, then each row as a JSON string, as soon as its chunk arrives.
+- `feed_select_to_duckdb_table(client, sql, con, table_name, *, if_exists="replace", **kwargs) -> int` -- streams the result straight into `table_name` on your own `duckdb.DuckDBPyConnection` (in-memory or a persistent `duckdb.connect("some.duckdb")`) as chunks arrive; `con` stays open afterwards with a real table to keep querying. `if_exists` is `"replace"` (default), `"append"`, or `"fail"`. Returns the row count written.
 - `client.execute_json_statement(sql, ...)` -- lower-level: JSON rows straight from Databricks, no duckdb/nanoarrow needed.
 
-`run_query`/`run_query_streamed`/`stream_query_json` all accept `catalog`, `schema`, `params` (Databricks' own `[{"name", "value", "type"}]` named-parameter format), `row_limit`, `offset`, and `total_timeout_s`.
+`run_query`/`run_query_streamed`/`stream_query_json`/`feed_select_to_duckdb_table` all accept `catalog`, `schema`, `params` (Databricks' own `[{"name", "value", "type"}]` named-parameter format), `row_limit`, `offset`, and `total_timeout_s`.
 
 ## License
 
