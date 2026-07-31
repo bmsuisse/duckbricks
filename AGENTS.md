@@ -5,15 +5,16 @@ Runs SQL against a Databricks SQL warehouse via the Statement Execution API, str
 ## Layout
 
 - `src/duckbricks/client.py` -- pure REST client (auth, statement submission/polling, backpressure-bounded concurrent chunk download). No duckdb/Arrow-backend dependency, intentionally: someone who only wants `execute_json_statement` shouldn't have to install them. Retries are a small hand-rolled `_retry_call` loop, not a dependency (see "Design invariants" below).
-- `src/duckbricks/query.py` -- everything that touches duckdb/Arrow: `ReplayableArrowChunk`, heartbeat helpers, `run_query`/`run_query_streamed`/`stream_query_json`. Requires the `duckdb` extra. `__init__.py` imports this in a `try/except ImportError` so the package still works without it.
-- `src/duckbricks/_arrow_backend.py` -- the pluggable Arrow IPC read/write backend: nanoarrow (`duckdb` extra, default) or arro3 (`duckdb-arro3` extra, e.g. for platforms where nanoarrow's wheel doesn't work), selected via try/except at import time. `set_arrow_backend()` lets a caller override with their own implementation instead.
+- `src/duckbricks/_streaming.py` -- the duckdb-free half: `ReplayableArrowChunk`, heartbeat helpers, chunk fetching, and `stream_query_json` (serializes via arro3's `write_ndjson`, not duckdb -- needs the `duckbricks[json]`/`duckdb-arro3` extra, raised as a clear `ImportError` at call time if missing). No `import duckdb` anywhere in this module, on purpose -- `__init__.py` imports it unconditionally.
+- `src/duckbricks/query.py` -- the genuinely duckdb-dependent functions: `run_query`/`run_query_streamed` (buffered, unions multiple chunks via a DuckDB `UNION ALL`), `feed_select_to_duckdb_table`/`feed_duckdb_table_to_databricks` (real DuckDB table materialization, not just serialization). Requires the `duckdb` extra; re-exports `_streaming.py`'s names too for backwards compatibility. `__init__.py` imports this in a `try/except ImportError` so the package still works without it.
+- `src/duckbricks/_arrow_backend.py` -- the pluggable Arrow IPC read/write backend: nanoarrow (`duckdb` extra, default) or arro3 (`duckdb-arro3` extra, e.g. for platforms where nanoarrow's wheel doesn't work), selected via try/except at import time. `set_arrow_backend()` lets a caller override with their own implementation instead. Unrelated to `_streaming.py`'s arro3 dependency, which is for JSON serialization specifically, not IPC parsing -- nanoarrow has no JSON writer of its own.
 - `tests/` -- respx mocks the Databricks REST endpoints (warehouse status, statement submit, chunk-link resolution, external-link byte download); no real warehouse or credentials needed to run the suite.
 - `examples/` -- `basic.py` (static token) and `azure_auth.py` (Azure AD `token_provider` via `azure-identity`, kept out of core deps on purpose -- see "Auth" below).
 
 ## Commands
 
 ```bash
-uv sync --all-extras       # install everything, incl. dev group + duckdb/duckdb-arro3 extras
+uv sync --all-extras       # install everything, incl. dev group + duckdb/duckdb-arro3/json extras
 uv run pytest -q
 uv run ruff check .
 uv run ty check src tests  # examples/azure_auth.py imports azure-identity, which is deliberately
@@ -31,6 +32,8 @@ One-time setup per clone: `prek install` (needs `uv tool install prek` first if 
 - **No silent row caps.** There's no `ABSOLUTE_ROW_LIMIT`-style ceiling baked in. If a caller wants one, that's `row_limit`, which they pass explicitly.
 - **No retry dependency.** `client.py`'s `_retry_call` is a ~10-line hand-rolled exponential-backoff loop, replacing tenacity on purpose -- it's the only retry pattern in the whole client, so a dependency for it wasn't worth it. Don't reach for tenacity (or another retry library) unless the retry logic actually grows real complexity (e.g. per-endpoint policies); a second small loop is still cheaper than the dependency.
 - **Arrow backend is pluggable, not hardcoded.** `query.py` never imports `nanoarrow`/`arro3` directly -- it goes through `_arrow_backend.py`'s `parse_ipc_stream`/`write_ipc_stream`, which resolve to nanoarrow (default) or arro3 depending on what's installed, or to whatever a caller passed to `set_arrow_backend()`. Keep new Arrow-touching code going through that module instead of importing a specific backend.
+- **`_streaming.py` never imports duckdb.** That's the entire point of the split from `query.py` -- it's what lets `duckbricks[json]` (arro3, no duckdb) work for `stream_query_json`. If a change to `_streaming.py` needs something duckdb provides, that function belongs in `query.py` instead, not a reason to import duckdb here.
+- **`stream_query_json`'s JSON output always goes through arro3, never nanoarrow.** nanoarrow has no JSON writer, so unlike `_arrow_backend.py`'s parse/write functions, there's no nanoarrow fallback here -- `_streaming._write_ndjson` imports `arro3.io` directly (lazily, at call time) and raises a clear `ImportError` if it's missing. Always pass `explicit_nulls=True` to `write_ndjson` -- arro3 omits null-valued keys by default, which would make a row's JSON shape vary by which columns happen to be null (see `test_write_ndjson_produces_one_json_object_per_row`).
 
 ## Testing
 

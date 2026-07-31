@@ -1,38 +1,44 @@
 from ._arrow_backend import set_arrow_backend
+from ._streaming import (
+    HEARTBEAT,
+    QueryTimeout,
+    ReplayableArrowChunk,
+    await_with_heartbeat,
+    stream_query_json,
+)
 from .client import DatabricksClient
 
-__all__ = ["DatabricksClient", "set_arrow_backend"]
+__all__ = [
+    "HEARTBEAT",
+    "DatabricksClient",
+    "QueryTimeout",
+    "ReplayableArrowChunk",
+    "await_with_heartbeat",
+    "set_arrow_backend",
+    "stream_query_json",
+]
 
 # The DuckDB-based serialization layer needs the `duckdb` extra
 # (`pip install duckbricks[duckdb]`, or `duckdb-arro3` -- see
 # src/duckbricks/_arrow_backend.py) -- keep it out of the top-level import so
-# `DatabricksClient` alone (e.g. for execute_json_statement) stays usable
-# without duckdb/an Arrow backend installed.
+# `DatabricksClient`/`stream_query_json` (imported above, needs only an Arrow
+# backend -- see _streaming.py and the `duckbricks[json]` extra) stay usable
+# without a real DuckDB engine installed.
 try:
     from .query import (
-        HEARTBEAT,
         QueryResult,
-        QueryTimeout,
-        ReplayableArrowChunk,
-        await_with_heartbeat,
         feed_duckdb_table_to_databricks,
         feed_select_to_duckdb_table,
         run_query,
         run_query_streamed,
-        stream_query_json,
     )
 
     __all__ += [
-        "HEARTBEAT",
         "QueryResult",
-        "QueryTimeout",
-        "ReplayableArrowChunk",
-        "await_with_heartbeat",
         "feed_duckdb_table_to_databricks",
         "feed_select_to_duckdb_table",
         "run_query",
         "run_query_streamed",
-        "stream_query_json",
     ]
 except ImportError:
     pass

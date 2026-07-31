@@ -1,6 +1,6 @@
 [project]
 name = "duckbricks"
-version = "0.2.0"
+version = "0.3.0"
 description = "Runs SQL against a Databricks SQL warehouse via the Statement Execution API, streams the Arrow-IPC result chunks with backpressure into DuckDB for JSON/rows/Arrow serialization -- no pyarrow required."
 readme = "README.md"
 license = "MIT"
@@ -22,6 +22,15 @@ duckdb = [
 # disk for no real speed advantage (see the package's own benchmark notes).
 duckdb-arro3 = [
     "duckdb>=1.2.0",
+    "arro3-core>=0.8",
+    "arro3-io>=0.8",
+]
+# For stream_query_json only (see src/duckbricks/_streaming.py) -- no duckdb
+# at all, just arro3's native Arrow-to-JSON writer. Pick this over the two
+# extras above if all you want is Databricks query results as JSON (e.g. a
+# FastAPI SSE endpoint) and have no use for run_query/feed_select_to_duckdb_table/
+# feed_duckdb_table_to_databricks, which all need a real DuckDB engine.
+json = [
     "arro3-core>=0.8",
     "arro3-io>=0.8",
 ]

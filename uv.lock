@@ -163,7 +163,7 @@ wheels = [
 
 [[package]]
 name = "duckbricks"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -179,6 +179,10 @@ duckdb-arro3 = [
     { name = "arro3-io" },
     { name = "duckdb" },
 ]
+json = [
+    { name = "arro3-core" },
+    { name = "arro3-io" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -193,13 +197,15 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "arro3-core", marker = "extra == 'duckdb-arro3'", specifier = ">=0.8" },
+    { name = "arro3-core", marker = "extra == 'json'", specifier = ">=0.8" },
     { name = "arro3-io", marker = "extra == 'duckdb-arro3'", specifier = ">=0.8" },
+    { name = "arro3-io", marker = "extra == 'json'", specifier = ">=0.8" },
     { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.2.0" },
     { name = "duckdb", marker = "extra == 'duckdb-arro3'", specifier = ">=1.2.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "nanoarrow", marker = "extra == 'duckdb'", specifier = ">=0.8.0" },
 ]
-provides-extras = ["duckdb", "duckdb-arro3"]
+provides-extras = ["duckdb", "duckdb-arro3", "json"]
 
 [package.metadata.requires-dev]
 dev = [
