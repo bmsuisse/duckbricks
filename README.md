@@ -42,7 +42,11 @@ async def main():
 asyncio.run(main())
 ```
 
-See [`examples/basic.py`](examples/basic.py) for a runnable version.
+See [`examples/basic.py`](examples/basic.py) for a runnable version, or
+[`examples/local_duckdb_mart.py`](examples/local_duckdb_mart.py) for streaming
+a query into a persistent local DuckDB file, exporting it to Excel, and
+querying it again with plain DuckDB SQL -- no more Databricks round trips
+once the data's on disk.
 
 ## Why not `databricks-sql-connector`?
 
