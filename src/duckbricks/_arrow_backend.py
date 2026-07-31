@@ -69,7 +69,14 @@ except ImportError:
             return _arro3_io.read_ipc_stream(io.BytesIO(data))
 
         def _arro3_write(stream: duckdb.DuckDBPyRelation, buf: BinaryIO) -> None:
-            _arro3_io.write_ipc_stream(stream, buf)
+            # arro3's default (compression="LZ4") body-compresses every record batch --
+            # DuckDB's own Arrow C Data Interface reader decompresses that fine (round-trips
+            # in-process), but consumers using a different Arrow IPC reader may not support
+            # LZ4-compressed IPC bodies at all (observed: duckdb-wasm's browser-side decoder
+            # silently fails to parse it). nanoarrow's writer never compresses, so parity with
+            # that backend -- and with any generic Arrow IPC reader -- means writing plain,
+            # uncompressed bodies here too.
+            _arro3_io.write_ipc_stream(stream, buf, compression=None)
 
         _parse_impl, _write_impl, BACKEND = _arro3_parse, _arro3_write, "arro3"
 

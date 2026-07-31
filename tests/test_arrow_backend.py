@@ -56,3 +56,28 @@ def test_no_backend_configured_raises_clear_import_error(restore_backend):
         _arrow_backend.parse_ipc_stream(b"data")
     with pytest.raises(ImportError, match="set_arrow_backend"):
         _arrow_backend.write_ipc_stream(_FAKE_RELATION, io.BytesIO())
+
+
+def test_arro3_write_does_not_compress(monkeypatch):
+    """Regression test: arro3.io.write_ipc_stream defaults to compression="LZ4",
+    which DuckDB's own Arrow C Data Interface reader decompresses transparently
+    (so an in-process round-trip test would never catch this) but which other
+    Arrow IPC readers may not support at all -- observed as a silent decode
+    failure in duckdb-wasm's browser-side reader. Must always write plain,
+    uncompressed bodies, matching the nanoarrow backend's behavior."""
+    arro3_io = pytest.importorskip("arro3.io")
+    # _arro3_write only exists as a module attribute if nanoarrow's import failed at
+    # duckbricks import time (nanoarrow is tried first) -- skip rather than fail in an
+    # environment where nanoarrow happens to also be installed.
+    arro3_write = getattr(_arrow_backend, "_arro3_write", None)
+    if arro3_write is None:
+        pytest.skip("nanoarrow is importable here, so the arro3 code path never ran")
+
+    calls = []
+    monkeypatch.setattr(
+        arro3_io,
+        "write_ipc_stream",
+        lambda stream, buf, **kwargs: calls.append(kwargs),
+    )
+    arro3_write(_FAKE_RELATION, io.BytesIO())
+    assert calls == [{"compression": None}]
